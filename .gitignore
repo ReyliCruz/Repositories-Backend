@@ -1,0 +1,25 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environments
+venv/
+env/
+repos-env
+
+# VSCode files
+.vscode/
+
+# Environment variables
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Ignorar archivo de entorno
+backend/.env
+
+# Ignorar entorno virtual (si está en backend o en la raíz)
+backend/cm-env/
