@@ -31,3 +31,6 @@ def root():
     return {"message": "🚀 API is running and DB connection works!"}
 
 app.include_router(github.router)
+
+from mangum import Mangum
+handler = Mangum(app)
