@@ -348,7 +348,7 @@ def store_github_event(event_type: str, payload: dict):
         cur = conn.cursor()
         cur.execute(
             '''
-            INSERT INTO Github_Event (event_type, payload, status, created_at)
+            INSERT INTO "Github_Event" (event_type, payload, status, created_at)
             VALUES (%s, %s, %s, %s)
             ''',
             (event_type, json.dumps(payload), "pending", datetime.utcnow())
