@@ -1,14 +1,43 @@
-def process_push_event(payload: dict, conn):
-    # Extraer datos del commit
-    head_commit = payload.get("head_commit", {})
-    sha = head_commit.get("id")
-    message = head_commit.get("message")
-    timestamp = head_commit.get("timestamp")
-    repo = payload.get("repository", {}).get("full_name")
+from datetime import datetime
+import json
 
-    # Guardar en tabla de feedback, o imprimir, etc.
-    print("💾 SHA:", sha)
-    print("📘 Message:", message)
-    print("📅 Fecha:", timestamp)
-    print("📦 Repo:", repo)
-    # Aquí podrías hacer cosas como analizar el código, etc.
+def process_push_event(payload: dict, conn):
+    try:
+        commits = payload.get("commits", [])
+        if not commits:
+            print("⚠️ No commits found in payload.")
+            return
+
+        repo = payload.get("repository", {}).get("full_name")
+        cur = conn.cursor()
+
+        for commit in commits:
+            sha = commit.get("id")
+            author_username = commit.get("author", {}).get("username")
+
+            employee_id = None
+            if author_username:
+                cur.execute(
+                    'SELECT id FROM "Employee" WHERE github_username = %s',
+                    (author_username,)
+                )
+                result = cur.fetchone()
+                if result:
+                    employee_id = result["id"]
+
+            cur.execute(
+                '''
+                INSERT INTO "Commit_Feedback" (sha, status, created_at, employee_id)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (sha) DO NOTHING
+                ''',
+                (sha, "analyzing", datetime.utcnow(), employee_id)
+            )
+
+            print(f"✅ Stored commit {sha} by {author_username or 'unknown'}")
+
+        conn.commit()
+
+    except Exception as e:
+        print("❌ Error in process_push_event:", e)
+        conn.rollback()
