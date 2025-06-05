@@ -1,14 +1,14 @@
 from fastapi import APIRouter, Request, Depends, Query
 from starlette.responses import JSONResponse
 from utils.auth import get_user_id_from_jwt
-from services.github_service import (
+from services.github.github_service import (
     get_user_github_credentials,
     fetch_github_repos,
     get_grouped_commits,
     get_pull_requests,
     get_commit_feedback,
     fetch_github_branches,
-    store_github_event
+    process_github_event
 )
 
 router = APIRouter()
@@ -58,7 +58,7 @@ async def github_webhook(request: Request):
         payload = await request.json()
         event_type = request.headers.get("X-GitHub-Event", "unknown")
 
-        store_github_event(event_type, payload)
+        process_github_event(event_type, payload)
 
         return JSONResponse(status_code=200, content={"message": "✅ Event received."})
     except Exception as e:

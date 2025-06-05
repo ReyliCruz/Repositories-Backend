@@ -7,6 +7,8 @@ from database import get_connection
 from fastapi import HTTPException
 from collections import defaultdict
 from datetime import datetime
+from services.github.events.pull_request import process_pull_request_event
+from services.github.events.push import process_push_event
 
 def get_user_github_credentials(user_id: int):
     try:
@@ -342,20 +344,44 @@ async def fetch_github_branches(token: str, repo: str):
             "default_branch": default_branch
         }
 
-def store_github_event(event_type: str, payload: dict):
+def process_github_event(event_type: str, payload: dict):
     try:
         conn = get_connection()
         cur = conn.cursor()
+
+        # 1. Guardar evento crudo
         cur.execute(
             '''
             INSERT INTO "Github_Event" (event_type, payload, status, created_at)
             VALUES (%s, %s, %s, %s)
+            RETURNING id
             ''',
             (event_type, json.dumps(payload), "pending", datetime.utcnow())
         )
+        event_id = cur.fetchone()[0]
         conn.commit()
+
+        # 2. Procesar el evento de forma secuencial
+        if event_type == "push":
+            print(f"🚀 Procesando evento push ID {event_id}")
+            process_push_event(payload, cur)
+        
+        elif event_type == "pull_request":
+            print(f"📦 Procesando evento PR ID {event_id}")
+            process_pull_request_event(payload, cur)
+
+        else:
+            print(f"⚠️ Tipo de evento no manejado: {event_type}")
+
+        # 3. Marcar evento como procesado
+        cur.execute(
+            '''UPDATE "Github_Event" SET status = %s, processed_at = %s WHERE id = %s''',
+            ("done", datetime.utcnow(), event_id)
+        )
+        conn.commit()
+
     except Exception as e:
-        print("❌ Error storing GitHub event:", e)
+        print("❌ Error processing GitHub event:", e)
         raise
     finally:
         conn.close()
