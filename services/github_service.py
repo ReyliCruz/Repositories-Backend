@@ -1,9 +1,10 @@
 import psycopg2
 import psycopg2.extras
-from database import get_connection
-from fastapi import HTTPException
 import requests
 import httpx
+import json
+from database import get_connection
+from fastapi import HTTPException
 from collections import defaultdict
 from datetime import datetime
 
@@ -340,3 +341,21 @@ async def fetch_github_branches(token: str, repo: str):
             "branches": branches,
             "default_branch": default_branch
         }
+
+def store_github_event(event_type: str, payload: dict):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            '''
+            INSERT INTO Github_Event (event_type, payload, status, created_at)
+            VALUES (%s, %s, %s, %s)
+            ''',
+            (event_type, json.dumps(payload), "pending", datetime.utcnow())
+        )
+        conn.commit()
+    except Exception as e:
+        print("❌ Error storing GitHub event:", e)
+        raise
+    finally:
+        conn.close()
