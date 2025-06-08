@@ -159,6 +159,30 @@ async def get_pull_requests(token: str, repo: str, username: str):
 
         pull_requests = []
 
+        repo_id = prs[0]["base"]["repo"]["id"] if prs else None
+        pr_numbers = [pr["number"] for pr in prs]
+        retro_map = {}
+
+        if repo_id is not None:
+            try:
+                conn = get_connection()
+                cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                cur.execute(
+                    '''
+                    SELECT pr_number, retro
+                    FROM "PullRequest_Feedback"
+                    WHERE github_repo_id = %s AND pr_number = ANY(%s)
+                    ''',
+                    (repo_id, pr_numbers)
+                )
+                results = cur.fetchall()
+                for row in results:
+                    retro_map[row["pr_number"]] = row["retro"]
+            except Exception as e:
+                print("❌ Error fetching PR retro info:", e)
+            finally:
+                conn.close()
+
         for pr in prs:
             is_author = pr["user"]["login"] == username
 
@@ -191,7 +215,7 @@ async def get_pull_requests(token: str, repo: str, username: str):
                 "author": pr["user"]["login"],
                 "date": date_label,
                 "status": status,
-                "retro": "Analizando", #Hardcoded
+                "retro": retro_map.get(pr["number"], "not_analyzed"),
                 "comments": comments_count
             })
 
