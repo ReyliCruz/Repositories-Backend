@@ -1,3 +1,4 @@
+import traceback
 import psycopg2
 import psycopg2.extras
 import requests
@@ -314,6 +315,125 @@ async def get_commit_feedback(token: str, repo: str, sha: str):
         "file_tree": file_tree
     }
 
+async def get_pull_request_feedback(token: str, repo: str, pr_number: int):
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json"
+    }
+
+    url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}"
+
+    async with httpx.AsyncClient() as client:
+        res = await client.get(url, headers=headers)
+        data = res.json()
+
+    title = data.get("title", "No title")
+    date_raw = data.get("created_at", "")
+    date_str = (
+        datetime.fromisoformat(date_raw.replace("Z", "")).strftime("%b %d, %Y")
+        if date_raw else ""
+    )
+    user = data.get("user", {})
+    author_name = user.get("login", "")
+    avatar_url = user.get("avatar_url", "")
+    pr_status = data.get("state", "unknown")
+
+    source_branch = data.get("head", {}).get("ref", "unknown")
+    target_branch = data.get("base", {}).get("ref", "unknown")
+    github_repo_id = data.get("base", {}).get("repo", {}).get("id")
+
+    files_url = data.get("url")
+    if not files_url or not files_url.startswith("http"):
+        files_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/files"
+    else:
+        files_url = files_url + "/files"
+
+    stats = {
+        "files_changed": 0,
+        "additions": 0,
+        "deletions": 0,
+        "total": 0
+    }
+    files_data = []
+    async with httpx.AsyncClient() as client:
+        files_res = await client.get(files_url, headers=headers)
+        try:
+            files_data = files_res.json()
+        except Exception as e:
+            print("❌ Error decoding GitHub PR files response:", e)
+            files_data = []
+
+    if isinstance(files_data, list):
+        for f in files_data:
+            if isinstance(f, dict):
+                stats["files_changed"] += 1
+                stats["additions"] += f.get("additions", 0)
+                stats["deletions"] += f.get("deletions", 0)
+        stats["total"] = stats["additions"] + stats["deletions"]
+    else:
+        print("⚠️ Warning: files_data is not a list.")
+        files_data = []
+
+    file_tree = build_file_tree(files_data)
+
+    summary = "This pull request has not been analyzed yet."
+    feedback = []
+    retro = "not_analyzed"
+    recommended_resources = []
+    created_at = None
+    analyzed_at = None
+    quality = None
+
+    try:
+        conn = get_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        cur.execute(
+            '''
+            SELECT summary, feedback, retro, recommended_resources,
+                   created_at, analyzed_at, quality
+            FROM "PullRequest_Feedback"
+            WHERE github_repo_id = %s AND pr_number = %s
+            ''',
+            (github_repo_id, pr_number)
+        )
+        row = cur.fetchone()
+
+        if row:
+            summary = row["summary"]
+            feedback = row["feedback"] if isinstance(row["feedback"], list) else []
+            recommended_resources = row.get("recommended_resources", []) if isinstance(row.get("recommended_resources"), list) else []
+            retro = row["retro"]
+            created_at = row.get("created_at")
+            analyzed_at = row.get("analyzed_at")
+            quality = row.get("quality")
+    except Exception as e:
+        print("❌ Error fetching PullRequest_Feedback:", e)
+    finally:
+        conn.close()
+
+    return {
+        "info": {
+            "title": title,
+            "date": date_str,
+            "author": author_name,
+            "avatar": avatar_url,
+            "branch_from": source_branch,
+            "branch_to": target_branch,
+            "created_at": created_at,
+            "analyzed_at": analyzed_at,
+            "quality": quality
+        },
+        "stats": stats,
+        "summary": summary,
+        "feedback": feedback,
+        "status": pr_status,
+        "retro": retro,
+        "recommended_resources": recommended_resources,
+        "files": files_data,
+        "file_tree": file_tree
+    }
+
 async def fetch_github_branches(token: str, repo: str):
     headers = {
         "Authorization": f"Bearer {token}",
@@ -344,12 +464,13 @@ async def fetch_github_branches(token: str, repo: str):
             "default_branch": default_branch
         }
 
-def process_github_event(event_type: str, payload: dict):
+async def process_github_event(event_type: str, payload: dict):
+    conn = None
     try:
         conn = get_connection()
-        cur = conn.cursor()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-        # 1. Guardar evento crudo
+        # 1. Save raw event
         cur.execute(
             '''
             INSERT INTO "Github_Event" (event_type, payload, status, created_at)
@@ -358,22 +479,22 @@ def process_github_event(event_type: str, payload: dict):
             ''',
             (event_type, json.dumps(payload), "pending", datetime.utcnow())
         )
-        event_id = cur.fetchone()[0]
+
+        result = cur.fetchone()
+        if result is None:
+            conn.rollback()
+            raise Exception("No se pudo obtener el ID del evento insertado.")
+
+        event_id = result["id"]
         conn.commit()
 
-        # 2. Procesar el evento de forma secuencial
+        # 2. Handle event
         if event_type == "push":
-            print(f"🚀 Procesando evento push ID {event_id}")
-            process_push_event(payload, cur)
-        
+            process_push_event(payload, conn)
         elif event_type == "pull_request":
-            print(f"📦 Procesando evento PR ID {event_id}")
-            process_pull_request_event(payload, cur)
+            process_pull_request_event(payload, conn)
 
-        else:
-            print(f"⚠️ Tipo de evento no manejado: {event_type}")
-
-        # 3. Marcar evento como procesado
+        # 3. Mark event as done
         cur.execute(
             '''UPDATE "Github_Event" SET status = %s, processed_at = %s WHERE id = %s''',
             ("done", datetime.utcnow(), event_id)
@@ -381,7 +502,10 @@ def process_github_event(event_type: str, payload: dict):
         conn.commit()
 
     except Exception as e:
-        print("❌ Error processing GitHub event:", e)
+        print("❌ Error processing GitHub event:", str(e))
+        traceback.print_exc()
         raise
+
     finally:
-        conn.close()
+        if conn:
+            conn.close()

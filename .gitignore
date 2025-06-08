@@ -23,3 +23,6 @@ backend/.env
 
 # Ignorar entorno virtual (si está en backend o en la raíz)
 backend/cm-env/
+
+# Ignorar carpeta de Testing
+/test
