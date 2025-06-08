@@ -360,7 +360,13 @@ async def get_pull_request_feedback(token: str, repo: str, pr_number: int):
     user = data.get("user", {})
     author_name = user.get("login", "")
     avatar_url = user.get("avatar_url", "")
-    pr_status = data.get("state", "unknown")
+
+    if data.get("merged_at"):
+        pr_status = "merged"
+    elif data.get("closed_at"):
+        pr_status = "closed"
+    else:
+        pr_status = "open"
 
     source_branch = data.get("head", {}).get("ref", "unknown")
     target_branch = data.get("base", {}).get("ref", "unknown")
