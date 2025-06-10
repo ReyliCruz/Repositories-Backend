@@ -190,6 +190,7 @@ def process_push_event(payload: dict, conn):
                     (sha, "analyzing", datetime.utcnow(), employee_id, author_username, repo_id)    
                 )
 
+
             # Obtener datos del commit
             try:
                 commit_data = fetch_commit_data(sha, repo, github_token)
