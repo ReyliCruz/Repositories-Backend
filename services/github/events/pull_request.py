@@ -148,77 +148,109 @@ def process_pull_request_event(payload: dict, conn):
     from datetime import datetime
     import json
 
+    print("📥 Incoming payload:")
+    print(json.dumps(payload, indent=2))
+
     pr = payload.get("pull_request", {})
     repo = payload.get("repository", {}).get("full_name", "")
     repo_id = payload.get("repository", {}).get("id")
     pr_number = pr.get("number")
     author_username = pr.get("user", {}).get("login")
 
-    print("📘 PR Title:", pr.get("title"))
-    print("🔗 URL:", pr.get("html_url"))
+    print(f"\n📘 PR Title: {pr.get('title')}")
+    print(f"🔗 PR URL: {pr.get('html_url')}")
+    print(f"📂 Repo: {repo} | 🆔 Repo ID: {repo_id} | 🔢 PR Number: {pr_number} | 👤 Author: {author_username}")
 
     if not repo or not pr_number or not author_username:
-        print("⚠️ Missing repo, PR number or author.")
+        print("⚠️ Missing repo, PR number, or author in the payload.")
         return
 
     cur = None
     try:
         cur = conn.cursor()
 
-        # Buscar empleado y token
+        print("🧠 Checking for employee GitHub token...")
         cur.execute(
             'SELECT id, github_token FROM "Employee" WHERE github_username = %s',
             (author_username,)
         )
         result = cur.fetchone()
-        if not result:
-            print("⚠️ No GitHub token found for author:", author_username)
-            return
 
-        employee_id, github_token = result
+        if not result or not result[1]:
+            print(f"⚠️ No GitHub token found in Employee table for user: {author_username}")
+            github_token = os.getenv("GITHUB_PAT")
+            employee_id = None
+            if not github_token:
+                print("❌ No fallback token (`GITHUB_PAT`) found. Aborting.")
+                return
+            print("🔑 Using fallback token from environment.")
+        else:
+            employee_id, github_token = result
+            print(f"✅ Found token for employee ID {employee_id}")
 
-        # Verificar existencia previa en PullRequest_Feedback
+        print("🔐 Token prefix:", github_token[:10])
+
+        # Buscar si ya existe registro del PR
+        print("🔎 Verifying if PullRequest_Feedback entry exists...")
         cur.execute(
             '''
-            SELECT 1 FROM "PullRequest_Feedback"
+            SELECT id FROM "PullRequest_Feedback"
             WHERE github_repo_id = %s AND pr_number = %s
             ''',
             (repo_id, pr_number)
         )
-        exists = cur.fetchone()
-        if not exists:
-            print(f"⚠️ No entry found for PR #{pr_number} in PullRequest_Feedback.")
-            return  # No actualización posible
+        row = cur.fetchone()
+        if not row:
+            print("🆕 Entry not found — inserting new blank row for processing.")
+            cur.execute(
+                '''
+                INSERT INTO "PullRequest_Feedback" (github_repo_id, pr_number)
+                VALUES (%s, %s)
+                RETURNING id
+                ''',
+                (repo_id, pr_number)
+            )
+            conn.commit()
+            row = cur.fetchone()
+            print("✅ Inserted row ID:", row[0])
 
-        # Obtener archivos del PR
+        print("📡 Fetching PR files from GitHub API...")
+        print("🔗 URL:", f"https://api.github.com/repos/{repo}/pulls/{pr_number}/files")
         try:
             files = fetch_pull_request_files(repo, pr_number, github_token)
+            print(f"📄 Files retrieved: {len(files)}")
         except Exception as e:
-            print(f"❌ Error fetching PR files for #{pr_number}:", e)
+            print(f"❌ Error fetching PR files: {e}")
             return
 
         feedback_result = []
-
         for file in files:
-            patch = file.get("patch")
             file_path = file.get("filename")
+            patch = file.get("patch")
 
+            print(f"\n📁 Processing file: {file_path}")
             if not patch:
+                print("⚠️ Skipping file — no patch found.")
                 continue
 
             structured_lines = parse_diff_to_lines(patch)
+            print(f"🔍 Parsed {len(structured_lines)} lines.")
+
             if not structured_lines:
+                print("⚠️ No lines to analyze.")
                 continue
 
             prompt = generate_prompt(structured_lines)
 
             try:
+                print("🤖 Sending prompt to Gemini...")
                 llm_response = call_llm(prompt, GEMINI_KEY_1)
                 cleaned = clean_llm_response(llm_response)
                 comments = json.loads(cleaned)
+                print(f"✅ Got {len(comments)} comments.")
             except Exception as e:
-                print(f"❌ Error in file {file_path}:", e)
-                print("🔍 Raw Gemini response:", repr(llm_response))
+                print(f"❌ Error analyzing {file_path}: {e}")
+                print("🛑 Raw response:", repr(llm_response) if 'llm_response' in locals() else "Not available")
                 comments = []
 
             if comments:
@@ -227,7 +259,6 @@ def process_pull_request_event(payload: dict, conn):
                     "comments": comments
                 })
 
-        # Generar resumen si hay feedback
         summary = None
         quality = None
         resources = []
@@ -235,6 +266,7 @@ def process_pull_request_event(payload: dict, conn):
 
         if feedback_result:
             try:
+                print("📝 Generating summary...")
                 summary_prompt = generate_summary_prompt(repo, f"PR-{pr_number}", feedback_result, diff_lines=len(feedback_result))
                 summary_raw = call_llm(summary_prompt, GEMINI_KEY_2)
                 cleaned_summary = clean_llm_response(summary_raw)
@@ -243,11 +275,12 @@ def process_pull_request_event(payload: dict, conn):
                 summary = summary_data.get("summary")
                 quality = summary_data.get("quality")
                 resources = summary_data.get("recommended_resources", [])
+                print("✅ Summary complete.")
             except Exception as e:
-                print(f"❌ Error generating summary for PR #{pr_number}:", e)
-                print("🔍 Raw summary response:", repr(summary_raw))
+                print(f"❌ Summary generation failed: {e}")
+                print("🛑 Raw summary response:", repr(summary_raw) if 'summary_raw' in locals() else "N/A")
 
-        # Actualizar la fila existente
+        print("💾 Updating PullRequest_Feedback entry...")
         cur.execute(
             '''
             UPDATE "PullRequest_Feedback"
@@ -273,17 +306,18 @@ def process_pull_request_event(payload: dict, conn):
                 pr_number
             )
         )
-
         conn.commit()
-        print(f"✅ PR #{pr_number} actualizado correctamente.")
+        print(f"✅ PR #{pr_number} processed and updated.")
 
     except Exception as e:
-        print("❌ Error in process_pull_request_event:", e)
+        print("❌ Fatal error:", e)
         try:
             conn.rollback()
+            print("↩️ Rollback successful.")
         except Exception as rollback_error:
-            print("⚠️ Rollback error:", rollback_error)
+            print("⚠️ Rollback failed:", rollback_error)
         raise
     finally:
         if cur:
             cur.close()
+            print("🔚 Cursor closed.")
