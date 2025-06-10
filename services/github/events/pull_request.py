@@ -144,3 +144,5 @@ def fetch_pull_request_files(repo: str, pr_number: int, token: str) -> list[dict
     res.raise_for_status()
     return res.json()
 
+def process_pull_request_event(payload: dict, conn):
+    pass
