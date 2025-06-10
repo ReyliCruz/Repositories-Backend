@@ -539,3 +539,204 @@ async def process_github_event(event_type: str, payload: dict):
     finally:
         if conn:
             conn.close()
+
+from collections import defaultdict, Counter
+from datetime import datetime
+from fastapi import HTTPException
+from psycopg2.extras import RealDictCursor
+import httpx
+
+async def get_repo_dashboard(repo_full_name: str, token: str, username: str):
+    try:
+        conn = get_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # 1. Buscar el ID del repositorio
+        cur.execute('SELECT github_repo_id FROM "Repositories" WHERE repo_full_name = %s', (repo_full_name,))
+        repo = cur.fetchone()
+        if not repo:
+            raise HTTPException(status_code=404, detail="Repository not found")
+        github_id = repo["github_repo_id"]
+
+        # 2. PRs y Commits del usuario
+        cur.execute('''
+            SELECT * FROM "PullRequest_Feedback"
+            WHERE github_repo_id = %s AND github_username = %s
+        ''', (github_id, username))
+        pr_feedback = cur.fetchall()
+
+        cur.execute('''
+            SELECT * FROM "Commit_Feedback"
+            WHERE github_repo_id = %s AND github_username = %s
+        ''', (github_id, username))
+        commit_feedback = cur.fetchall()
+
+        # 3. Inicialización de KPIs y estructuras
+        kpis = {
+            "total_prs": 0,
+            "analyzed_prs": len(pr_feedback),
+            "total_commits": 0,
+            "analyzed_commits": len(commit_feedback),
+            "avg_quality_prs": 0,
+            "avg_quality_commits": 0,
+            "total_recommendations": 0,
+            "total_resources": 0,
+            "reviewers_count": 0,
+            "total_lines_added": 0,
+            "total_lines_deleted": 0,
+            "avg_merge_time_days": 0
+        }
+
+        prs_quality_sum = 0
+        commits_quality_sum = 0
+        prs_timeline = defaultdict(list)
+        commits_timeline = defaultdict(list)
+        recent_prs = []
+        recent_commits = []
+        recommendations = set()
+        resources = set()
+        modified_files_counter = Counter()
+        feedback_distribution = Counter()
+        total_merge_days = 0
+        merge_count = 0
+
+        async with httpx.AsyncClient() as client:
+            for pr in pr_feedback:
+                try:
+                    pr_number = pr.get("pr_number")
+                    if not pr_number:
+                        continue
+
+                    res = await client.get(
+                        f"https://api.github.com/repos/{repo_full_name}/pulls/{pr_number}",
+                        headers={"Authorization": f"Bearer {token}"}
+                    )
+                    if res.status_code != 200:
+                        continue
+
+                    gh = res.json()
+                    kpis["total_prs"] += 1
+
+                    quality = pr.get("quality")
+                    retro = pr.get("retro") or "not_analyzed"
+                    feedback_distribution[retro] += 1
+
+                    created_str = gh.get("created_at")
+                    created = datetime.strptime(created_str, "%Y-%m-%dT%H:%M:%SZ").date() if created_str else None
+
+                    if quality and created:
+                        prs_quality_sum += quality
+                        prs_timeline[created].append(quality)
+
+                    for f in pr.get("feedback") or []:
+                        text = f.get("text", "").strip()
+                        if text:
+                            recommendations.add(text)
+
+                    for r in pr.get("recommended_resources") or []:
+                        title = r.get("title", "").strip()
+                        link = r.get("link", "").strip()
+                        if title and link:
+                            resources.add((title, link))
+
+                    merged_str = gh.get("merged_at")
+                    if created and merged_str:
+                        merged = datetime.strptime(merged_str, "%Y-%m-%dT%H:%M:%SZ")
+                        merge_days = (merged.date() - created).days
+                        total_merge_days += merge_days
+                        merge_count += 1
+
+                    recent_prs.append({
+                        "title": gh.get("title", "Untitled PR"),
+                        "file": pr.get("main_file", "unknown.js"),
+                        "retro": retro,
+                        "comments": gh.get("comments", 0) + gh.get("review_comments", 0),
+                        "created_at": created_str,
+                        "merged_at": merged_str,
+                        "state": gh.get("state", "unknown")
+                    })
+                except Exception as e:
+                    print(f"⚠️ Error processing PR #{pr.get('pr_number')}: {e}")
+
+            for commit in commit_feedback:
+                try:
+                    kpis["total_commits"] += 1
+                    quality = commit.get("quality")
+                    if quality:
+                        commits_quality_sum += quality
+
+                    created = commit.get("created_at")
+                    if isinstance(created, datetime):
+                        commits_timeline[created.date()].append(quality)
+
+                    files = commit.get("files") or []
+                    for f in files:
+                        filename = f.get("filename")
+                        if filename:
+                            modified_files_counter[filename] += 1
+                        kpis["total_lines_added"] += f.get("additions", 0)
+                        kpis["total_lines_deleted"] += f.get("deletions", 0)
+
+                    recent_commits.append({
+                        "sha": commit.get("sha"),
+                        "message": commit.get("summary", "No message"),
+                        "status": commit.get("status", "not_analyzed"),
+                        "created_at": created.isoformat() if isinstance(created, datetime) else "unknown"
+                    })
+                except Exception as e:
+                    print(f"⚠️ Error processing commit {commit.get('sha')}: {e}")
+
+        # 4. KPIs Finales
+        if pr_feedback:
+            kpis["avg_quality_prs"] = round(prs_quality_sum / len(pr_feedback), 2)
+        if commit_feedback:
+            kpis["avg_quality_commits"] = round(commits_quality_sum / len(commit_feedback), 2)
+        if merge_count:
+            kpis["avg_merge_time_days"] = round(total_merge_days / merge_count, 2)
+
+        kpis["total_recommendations"] = len(recommendations)
+        kpis["total_resources"] = len(resources)
+
+        # 5. Formato timeline
+        def format_timeline(source):
+            days = sorted(source.keys())[-30:]
+            return {
+                "days": [day.isoformat() for day in days],
+                "quality": [round(sum(values)/len(values), 2) if values else 0 for values in [source[d] for d in days]],
+                "count": [len(source[d]) for d in days]
+            }
+
+        timeline = {
+            "prs": format_timeline(prs_timeline),
+            "commits": format_timeline(commits_timeline)
+        }
+
+        top_files = [{"file": file, "count": count} for file, count in modified_files_counter.most_common(5)]
+
+        user = {
+            "username": username,
+            "avatar_url": f"https://github.com/{username}.png",
+            "email": f"{username}@example.com"
+        }
+
+        return {
+            "user": user,
+            "kpis": kpis,
+            "timeline": timeline,
+            "feedback_distribution": dict(feedback_distribution),
+            "top_modified_files": top_files,
+            "recommendations": list(recommendations)[:10],
+            "resources": [{"title": r[0], "link": r[1]} for r in resources],
+            "recent": {
+                "prs": recent_prs[:5],
+                "commits": recent_commits[:5]
+            }
+        }
+
+    except Exception as e:
+        print("❌ Error in get_repo_dashboard:", e)
+        raise HTTPException(status_code=500, detail="Internal server error in dashboard")
+
+    finally:
+        if conn:
+            conn.close()

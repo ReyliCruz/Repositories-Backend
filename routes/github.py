@@ -4,6 +4,7 @@ import traceback
 from utils.auth import get_user_id_from_jwt
 from services.github.github_service import (
     get_pull_request_feedback,
+    get_repo_dashboard,
     get_user_github_credentials,
     fetch_github_repos,
     get_grouped_commits,
@@ -75,3 +76,11 @@ async def github_webhook(request: Request):
         print("❌ Error in webhook endpoint:", str(e))
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"message": "❌ Failed to process webhook."})
+
+@router.get("/github/repo-dashboard")
+async def repo_dashboard(
+    repo_full_name: str = Query(..., alias="repo"),
+    user_id: int = Depends(get_user_id_from_jwt)
+):
+    token, username = get_user_github_credentials(user_id)
+    return await get_repo_dashboard(repo_full_name, token, username)
