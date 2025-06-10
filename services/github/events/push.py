@@ -180,12 +180,14 @@ def process_push_event(payload: dict, conn):
 
             if not already_exists:
                 # Insertar registro inicial
+                repo_id = payload.get("repository", {}).get("id")
+
                 cur.execute(
                     '''
-                    INSERT INTO "Commit_Feedback" (sha, status, created_at, employee_id, github_username)
-                    VALUES (%s, %s, %s, %s, %s)
+                    INSERT INTO "Commit_Feedback" (sha, status, created_at, employee_id, github_username, github_repo_id)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     ''',
-                    (sha, "analyzing", datetime.utcnow(), employee_id, author_username)
+                    (sha, "analyzing", datetime.utcnow(), employee_id, author_username, repo_id)    
                 )
 
             # Obtener datos del commit
